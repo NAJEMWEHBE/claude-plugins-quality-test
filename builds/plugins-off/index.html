@@ -1,0 +1,649 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Halden — Natural Spring Water</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #9fb0bc; }
+  canvas { display: block; touch-action: none; }
+  #vignette {
+    position: fixed; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse at 50% 45%, rgba(0,0,0,0) 55%, rgba(8,18,28,0.30) 100%);
+  }
+  #hint {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    font: 500 13px/1 Archivo, system-ui, sans-serif; letter-spacing: 0.04em;
+    color: #13283a; pointer-events: none; user-select: none;
+    transition: opacity 0.9s ease;
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="vignette"></div>
+<div id="hint">Drag to orbit · Scroll to zoom</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---------------------------------------------------------------------------
+// Renderer, scene, camera
+// ---------------------------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.NeutralToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x9fb0bc);
+
+const camera = new THREE.PerspectiveCamera(32, window.innerWidth / window.innerHeight, 0.05, 120);
+camera.position.set(2.3, 2.0, 5.0);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 1.05, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.enablePan = false;
+controls.minDistance = 1.8;
+controls.maxDistance = 10;
+controls.maxPolarAngle = Math.PI * 0.49;
+controls.update();
+
+// ---------------------------------------------------------------------------
+// Studio environment (used for reflections): dark room with softbox strips
+// ---------------------------------------------------------------------------
+function makeStudioEnv() {
+  const env = new THREE.Scene();
+  const room = new THREE.Mesh(
+    new THREE.BoxGeometry(30, 20, 30),
+    new THREE.MeshBasicMaterial({ color: 0x2c343a, side: THREE.BackSide })
+  );
+  room.position.y = 8;
+  env.add(room);
+
+  const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(30, 30),
+    new THREE.MeshBasicMaterial({ color: 0x7d8c96 })
+  );
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.y = -1.9;
+  env.add(floor);
+
+  const panel = (w, h, x, y, z, intensity) => {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, h),
+      new THREE.MeshBasicMaterial({
+        color: new THREE.Color(1, 1, 1).multiplyScalar(intensity),
+        side: THREE.DoubleSide,
+      })
+    );
+    m.position.set(x, y, z);
+    m.lookAt(0, 1, 0);
+    env.add(m);
+  };
+  panel(1.6, 9, -6.5, 3, 2.5, 6);   // key strip, front-left
+  panel(1.2, 9, 6.5, 3, 0.5, 4);    // fill strip, right
+  panel(5, 5, 0, 10, 0, 2.5);       // overhead softbox
+  panel(1.0, 7, -3.5, 3, -7, 3);    // rim strips behind
+  panel(1.0, 7, 3.5, 3, -7, 3);
+  return env;
+}
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(makeStudioEnv(), 0.02).texture;
+pmrem.dispose();
+
+// ---------------------------------------------------------------------------
+// Lights
+// ---------------------------------------------------------------------------
+const LIGHT_POS = new THREE.Vector3(-2.6, 5, 3.2);
+const key = new THREE.DirectionalLight(0xfff5ea, 2.2);
+key.position.copy(LIGHT_POS);
+scene.add(key);
+
+scene.add(new THREE.HemisphereLight(0xdfeaf2, 0x6d7a83, 0.45));
+
+// Background light: a soft glow on the backdrop behind the bottle
+const glow = new THREE.SpotLight(0xf4f9fc, 5, 0, 0.5, 1, 0);
+glow.position.set(0, 0.6, -2);
+glow.target.position.set(0, 2.6, -9);
+scene.add(glow, glow.target);
+
+// ---------------------------------------------------------------------------
+// Cyclorama (seamless floor curving up into a wall)
+// ---------------------------------------------------------------------------
+function makeCyclorama() {
+  const prof = [];
+  const rc = 4, cz = -5, cy = 4;
+  for (let z = 14; z > cz + 1e-6; z -= 0.5) prof.push({ z, y: 0, nz: 0, ny: 1 });
+  for (let i = 0; i <= 24; i++) {
+    const a = (i / 24) * Math.PI / 2;
+    const z = cz - rc * Math.sin(a), y = cy - rc * Math.cos(a);
+    prof.push({ z, y, nz: (cz - z) / rc, ny: (cy - y) / rc });
+  }
+  for (let y = cy + 0.5; y <= 18; y += 0.5) prof.push({ z: cz - rc, y, nz: 1, ny: 0 });
+
+  const width = 44, xseg = 44, cols = xseg + 1;
+  const pos = [], nor = [], idx = [];
+  for (const p of prof) {
+    for (let j = 0; j <= xseg; j++) {
+      pos.push(-width / 2 + (j / xseg) * width, p.y, p.z);
+      nor.push(0, p.ny, p.nz);
+    }
+  }
+  for (let i = 0; i < prof.length - 1; i++) {
+    for (let j = 0; j < xseg; j++) {
+      const a = i * cols + j, b = (i + 1) * cols + j, c = a + 1, d = b + 1;
+      idx.push(a, c, b, c, d, b);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  g.setIndex(idx);
+  return new THREE.Mesh(g, new THREE.MeshStandardMaterial({
+    color: 0xb3c1cb, roughness: 0.92, envMapIntensity: 0.6,
+  }));
+}
+scene.add(makeCyclorama());
+
+// ---------------------------------------------------------------------------
+// Bottle dimensions (world units ≈ decimetres)
+// ---------------------------------------------------------------------------
+const R = 0.34;            // body radius
+const RN = 0.128;          // neck radius
+const WALL = 0.007;        // wall thickness
+const SH0 = 1.5, SH1 = 1.93, TOP = 2.13;
+const LABEL_Y0 = 0.38, LABEL_Y1 = 0.98, LABEL_R = R + 0.0025;
+const WATER_Y = 1.27;      // ~70% of the volume
+const RC = 0.152, CAP_Y0 = 2.038, CAP_Y1 = 2.24;
+const GROOVES = [0.17, 0.27, 1.08, 1.18, 1.38];
+
+const v2 = (x, y) => new THREE.Vector2(x, y);
+const smoothstep = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+
+function bodyRadius(y) {
+  if (y >= SH0) {
+    const t = Math.min(1, (y - SH0) / (SH1 - SH0));
+    const s = t * t * t * (t * (t * 6 - 15) + 10);
+    return R - (R - RN) * s;
+  }
+  let r = R;
+  for (const g of GROOVES) r -= 0.011 * Math.exp(-(((y - g) / 0.016) ** 2));
+  return r;
+}
+
+function baseCorner(pts, inset) {
+  for (let i = 0; i <= 12; i++) {
+    const a = -Math.PI / 2 + (i / 12) * Math.PI / 2;
+    pts.push(v2(R - 0.06 + (0.06 - inset) * Math.cos(a), 0.06 + (0.06 - inset) * Math.sin(a)));
+  }
+}
+
+function outerProfile() {
+  const pts = [v2(0, 0.045), v2(0.08, 0.042), v2(0.16, 0.032), v2(0.23, 0.016), v2(R - 0.075, 0.004)];
+  baseCorner(pts, 0);
+  for (let y = 0.064; y < SH1; y += 0.004) pts.push(v2(bodyRadius(y), y));
+  pts.push(
+    v2(RN, SH1), v2(RN, 1.972),
+    v2(RN + 0.03, 1.978), v2(RN + 0.038, 1.985), v2(RN + 0.038, 1.995),
+    v2(RN + 0.03, 2.002), v2(RN, 2.006), v2(RN, TOP)
+  );
+  return pts;
+}
+
+function waterProfile() {
+  const b = WALL;
+  const pts = [v2(0, 0.045 + b), v2(0.08, 0.042 + b), v2(0.16, 0.032 + b), v2(0.23, 0.016 + b), v2(R - 0.075, 0.004 + b)];
+  baseCorner(pts, b);
+  for (let y = 0.064; y < WATER_Y; y += 0.004) pts.push(v2(bodyRadius(y) - b, y));
+  const rw = bodyRadius(WATER_Y) - b;
+  // meniscus creeping up the wall, then a flat surface to the axis
+  pts.push(
+    v2(rw, WATER_Y + 0.006), v2(rw - 0.006, WATER_Y + 0.0035),
+    v2(rw - 0.016, WATER_Y + 0.0012), v2(rw - 0.035, WATER_Y + 0.0002),
+    v2(rw * 0.5, WATER_Y), v2(0, WATER_Y)
+  );
+  return pts;
+}
+
+const bottleGroup = new THREE.Group();
+scene.add(bottleGroup);
+
+// ---------------------------------------------------------------------------
+// Bottle shell: thin clear PET. Rendered as a premultiplied transparent layer
+// whose opacity follows a Fresnel term, so reflections stay at full strength
+// and the walls read as clear in the middle and denser at grazing angles.
+// ---------------------------------------------------------------------------
+const bottleMat = new THREE.MeshPhysicalMaterial({
+  color: 0x9fb4bf,
+  roughness: 0.035,
+  metalness: 0,
+  ior: 1.57,
+  envMapIntensity: 1.5,
+  transparent: true,
+  side: THREE.DoubleSide,
+  depthWrite: false,
+});
+bottleMat.blending = THREE.CustomBlending;
+bottleMat.blendSrc = THREE.OneFactor;
+bottleMat.blendDst = THREE.OneMinusSrcAlphaFactor;
+bottleMat.blendSrcAlpha = THREE.OneFactor;
+bottleMat.blendDstAlpha = THREE.OneMinusSrcAlphaFactor;
+bottleMat.onBeforeCompile = (shader) => {
+  shader.fragmentShader = shader.fragmentShader.replace(
+    '#include <opaque_fragment>',
+    `
+    float facing = abs(dot(normalize(normal), normalize(vViewPosition)));
+    float fres = pow(1.0 - facing, 3.0);
+    float shellAlpha = clamp(0.045 + 0.62 * fres, 0.0, 1.0);
+    gl_FragColor = vec4(totalDiffuse * shellAlpha + totalSpecular, shellAlpha);
+    `
+  );
+};
+const bottle = new THREE.Mesh(new THREE.LatheGeometry(outerProfile(), 128), bottleMat);
+bottleGroup.add(bottle);
+
+// ---------------------------------------------------------------------------
+// Water: refractive volume with a slight cool tint
+// ---------------------------------------------------------------------------
+const waterMat = new THREE.MeshPhysicalMaterial({
+  color: 0xffffff,
+  metalness: 0,
+  roughness: 0.02,
+  transmission: 1,
+  ior: 1.333,
+  thickness: 0.62,
+  attenuationColor: new THREE.Color(0xbfe4f0),
+  attenuationDistance: 1.6,
+  dispersion: 0.25,
+  specularIntensity: 1,
+  envMapIntensity: 1.2,
+});
+const water = new THREE.Mesh(new THREE.LatheGeometry(waterProfile(), 128), waterMat);
+bottleGroup.add(water);
+
+// ---------------------------------------------------------------------------
+// Label (canvas-drawn print, wrapped around the body)
+// ---------------------------------------------------------------------------
+const NAVY = '#0c2a47';
+
+function spacedText(ctx, text, x, y, spacing, align = 'center') {
+  const chars = [...text];
+  const widths = chars.map((c) => ctx.measureText(c).width);
+  const total = widths.reduce((a, b) => a + b, 0) + spacing * (chars.length - 1);
+  let cx = align === 'center' ? x - total / 2 : align === 'right' ? x - total : x;
+  ctx.textAlign = 'left';
+  chars.forEach((c, i) => { ctx.fillText(c, cx, y); cx += widths[i] + spacing; });
+}
+
+function drawLabel(canvas) {
+  const W = canvas.width, H = canvas.height;
+  const ctx = canvas.getContext('2d');
+  const FRONT = W / 2;
+
+  // sky
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#eef6fa');
+  sky.addColorStop(0.55, '#c3e0ee');
+  sky.addColorStop(1, '#a9d0e6');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H);
+
+  // periodic ridgelines (seamless around the bottle)
+  const ridge = (base, comps, x) => {
+    let h = 0;
+    for (const [k, a, p] of comps) h += a * Math.pow(1 - Math.abs(Math.sin(Math.PI * k * x / W + p)), 1.6);
+    return (base - h) * H;
+  };
+  const rangePath = (base, comps) => {
+    const path = new Path2D();
+    path.moveTo(0, H);
+    for (let x = 0; x <= W; x += 2) path.lineTo(x, ridge(base, comps, x));
+    path.lineTo(W, H);
+    path.closePath();
+    return path;
+  };
+
+  // far range with snow
+  const farComps = [[3, 0.14, 0.3], [7, 0.06, 1.1], [17, 0.02, 0.4]];
+  const far = rangePath(0.70, farComps);
+  const farGrad = ctx.createLinearGradient(0, 0.45 * H, 0, 0.75 * H);
+  farGrad.addColorStop(0, '#7fa9ca');
+  farGrad.addColorStop(1, '#5a8bb3');
+  ctx.fillStyle = farGrad;
+  ctx.fill(far);
+  ctx.save();
+  ctx.clip(far);
+  const snow = new Path2D();
+  snow.moveTo(0, 0);
+  for (let x = 0; x <= W; x += 2) {
+    snow.lineTo(x, 0.565 * H + 0.016 * H * Math.sin(x * 0.05) + 0.012 * H * Math.sin(x * 0.013 + 1.0) + 0.008 * H * Math.sin(x * 0.11));
+  }
+  snow.lineTo(W, 0);
+  snow.closePath();
+  ctx.fillStyle = '#f4f9fc';
+  ctx.fill(snow);
+  ctx.restore();
+
+  // middle range
+  ctx.fillStyle = '#2f6593';
+  ctx.fill(rangePath(0.79, [[4, 0.07, 2.5], [9, 0.03, 0.7], [21, 0.01, 1.3]]));
+
+  // near range flows into the navy band
+  ctx.fillStyle = NAVY;
+  ctx.fill(rangePath(0.845, [[2, 0.09, 1.9], [5, 0.05, 0.2], [13, 0.018, 2.2]]));
+
+  // thin edge rules at top and bottom of the label
+  ctx.fillStyle = NAVY;
+  ctx.fillRect(0, 0, W, 5);
+  ctx.fillStyle = '#5fb7d9';
+  ctx.fillRect(0, H - 9, W, 3);
+
+  ctx.textBaseline = 'alphabetic';
+
+  // ---- front panel ----
+  ctx.fillStyle = NAVY;
+  ctx.font = '600 21px Archivo, "Helvetica Neue", Arial, sans-serif';
+  spacedText(ctx, 'GLACIAL SPRING  ·  JOSTEDAL, NORWAY', FRONT, 0.125 * H, 5);
+  ctx.font = '900 156px Archivo, "Arial Black", "Helvetica Neue", sans-serif';
+  spacedText(ctx, 'HALDEN', FRONT, 0.40 * H, 16);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '700 29px Archivo, "Helvetica Neue", Arial, sans-serif';
+  spacedText(ctx, 'NATURAL SPRING WATER', FRONT, 0.935 * H, 9);
+  ctx.fillStyle = '#9fd3ea';
+  ctx.font = '700 24px Archivo, "Helvetica Neue", Arial, sans-serif';
+  spacedText(ctx, 'STILL', FRONT - 390, 0.935 * H, 5);
+  spacedText(ctx, '500 mL', FRONT + 390, 0.935 * H, 3);
+
+  // ---- left side panel: mineral analysis ----
+  const LX = FRONT - 680;
+  ctx.fillStyle = NAVY;
+  ctx.font = '700 19px Archivo, "Helvetica Neue", Arial, sans-serif';
+  spacedText(ctx, 'TYPICAL ANALYSIS  mg/L', LX, 0.11 * H, 3);
+  const rows = [
+    ['Calcium', '9.8'], ['Magnesium', '1.2'], ['Sodium', '2.4'], ['Potassium', '0.6'],
+    ['Bicarbonate', '31'], ['Sulphate', '4.1'], ['Dry residue', '52'], ['pH', '7.2'],
+  ];
+  ctx.font = '500 18px Archivo, "Helvetica Neue", Arial, sans-serif';
+  rows.forEach(([name, val], i) => {
+    const col = i < 4 ? 0 : 1;
+    const row = i % 4;
+    const x0 = LX - 210 + col * 225, x1 = x0 + 195;
+    const y = 0.19 * H + row * 30;
+    ctx.fillStyle = NAVY;
+    ctx.textAlign = 'left';
+    ctx.fillText(name, x0, y);
+    ctx.textAlign = 'right';
+    ctx.fillText(val, x1, y);
+    ctx.fillStyle = 'rgba(12,42,71,0.25)';
+    ctx.fillRect(x0, y + 9, 195, 1.5);
+  });
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '600 17px Archivo, "Helvetica Neue", Arial, sans-serif';
+  spacedText(ctx, 'BOTTLED AT SOURCE', LX, 0.935 * H, 4);
+
+  // ---- right side panel: barcode + recycling ----
+  const RX = FRONT + 680;
+  const bx = RX - 105, by = 0.09 * H, bw = 210, bh = 128;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(bx, by, bw, bh);
+  ctx.fillStyle = '#0a1620';
+  let seed = 7;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  let x = bx + 16;
+  while (x < bx + bw - 18) {
+    const w = 1.5 + Math.floor(rnd() * 3) * 1.5;
+    ctx.fillRect(x, by + 12, w, bh - 44);
+    x += w + 1.5 + Math.floor(rnd() * 3) * 1.5;
+  }
+  ctx.font = '500 16px Archivo, "Helvetica Neue", Arial, sans-serif';
+  spacedText(ctx, '7 038010 024915', RX, by + bh - 12, 2);
+  ctx.fillStyle = NAVY;
+  ctx.font = '600 16px Archivo, "Helvetica Neue", Arial, sans-serif';
+  spacedText(ctx, 'BEST BEFORE: SEE CAP', RX, by + bh + 30, 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '600 17px Archivo, "Helvetica Neue", Arial, sans-serif';
+  spacedText(ctx, '100% rPET  ·  PLEASE RECYCLE', RX, 0.935 * H, 3);
+
+  // print grain
+  const img = ctx.getImageData(0, 0, W, H);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const n = (Math.random() - 0.5) * 9;
+    d[i] += n; d[i + 1] += n; d[i + 2] += n;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+const labelCanvas = document.createElement('canvas');
+labelCanvas.width = 2048;
+labelCanvas.height = 572; // matches circumference : height of the label
+drawLabel(labelCanvas);
+const labelTex = new THREE.CanvasTexture(labelCanvas);
+labelTex.colorSpace = THREE.SRGBColorSpace;
+labelTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+
+const redrawLabel = () => { drawLabel(labelCanvas); labelTex.needsUpdate = true; };
+window.addEventListener('load', () => {
+  Promise.all([
+    '900 156px Archivo', '700 29px Archivo', '600 21px Archivo', '500 18px Archivo',
+  ].map((f) => document.fonts.load(f))).then(redrawLabel, () => {});
+});
+
+const LABEL_H = LABEL_Y1 - LABEL_Y0;
+const labelOuter = new THREE.Mesh(
+  new THREE.CylinderGeometry(LABEL_R, LABEL_R, LABEL_H, 192, 1, true, -Math.PI, Math.PI * 2),
+  new THREE.MeshPhysicalMaterial({
+    map: labelTex, roughness: 0.42, clearcoat: 0.35, clearcoatRoughness: 0.28, envMapIntensity: 0.8,
+  })
+);
+labelOuter.position.y = LABEL_Y0 + LABEL_H / 2;
+const labelInner = new THREE.Mesh(
+  new THREE.CylinderGeometry(LABEL_R - 0.001, LABEL_R - 0.001, LABEL_H, 192, 1, true),
+  new THREE.MeshStandardMaterial({ color: 0xeef1f3, roughness: 0.9, side: THREE.BackSide })
+);
+labelInner.position.y = labelOuter.position.y;
+bottleGroup.add(labelOuter, labelInner);
+
+// ---------------------------------------------------------------------------
+// Cap with knurled grip + tamper band
+// ---------------------------------------------------------------------------
+function capGeometry() {
+  const p = [v2(RC - 0.012, CAP_Y0), v2(RC - 0.004, CAP_Y0), v2(RC, CAP_Y0 + 0.006)];
+  for (let y = CAP_Y0 + 0.012; y <= CAP_Y1 - 0.02; y += 0.008) p.push(v2(RC, y));
+  const cr = 0.016;
+  for (let i = 0; i <= 10; i++) {
+    const a = (i / 10) * Math.PI / 2;
+    p.push(v2(RC - cr + cr * Math.cos(a), CAP_Y1 - cr + cr * Math.sin(a)));
+  }
+  p.push(v2(RC * 0.6, CAP_Y1), v2(RC * 0.3, CAP_Y1), v2(0, CAP_Y1));
+
+  const SEG = 540;
+  const g = new THREE.LatheGeometry(p, SEG);
+  const refNormals = g.attributes.normal.array.slice();
+  const pos = g.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    const r = Math.hypot(x, z);
+    if (r < 1e-5) continue;
+    const fade = smoothstep(CAP_Y0 + 0.01, CAP_Y0 + 0.022, y) * (1 - smoothstep(CAP_Y1 - 0.03, CAP_Y1 - 0.018, y));
+    const th = Math.atan2(x, z);
+    const ridge = Math.pow(0.5 + 0.5 * Math.cos(th * 90), 0.6);
+    const nr = r - 0.0042 * (1 - ridge) * fade;
+    pos.setXYZ(i, (x / r) * nr, y, (z / r) * nr);
+  }
+  g.computeVertexNormals();
+  const n = g.attributes.normal;
+  // keep outward orientation consistent with the original lathe normals
+  let dot = 0;
+  for (let i = 0; i < n.count; i += 7) {
+    dot += n.getX(i) * refNormals[i * 3] + n.getY(i) * refNormals[i * 3 + 1] + n.getZ(i) * refNormals[i * 3 + 2];
+  }
+  if (dot < 0) for (let i = 0; i < n.array.length; i++) n.array[i] *= -1;
+  // weld normals across the lathe seam
+  const P = p.length;
+  for (let j = 0; j < P; j++) {
+    const a = j, b = SEG * P + j;
+    const nx = n.getX(a) + n.getX(b), ny = n.getY(a) + n.getY(b), nz = n.getZ(a) + n.getZ(b);
+    const l = Math.hypot(nx, ny, nz) || 1;
+    n.setXYZ(a, nx / l, ny / l, nz / l);
+    n.setXYZ(b, nx / l, ny / l, nz / l);
+  }
+  n.needsUpdate = true;
+  return g;
+}
+const capMat = new THREE.MeshPhysicalMaterial({
+  color: 0x1b5a9e, roughness: 0.36, clearcoat: 0.3, clearcoatRoughness: 0.35, envMapIntensity: 1.0,
+});
+const cap = new THREE.Mesh(capGeometry(), capMat);
+const band = new THREE.Mesh(
+  new THREE.LatheGeometry([
+    v2(RC - 0.006, 2.012), v2(RC - 0.002, 2.012), v2(RC - 0.0015, 2.016),
+    v2(RC - 0.0015, 2.030), v2(RC - 0.003, 2.033), v2(RC - 0.008, 2.033),
+  ], 128),
+  capMat
+);
+bottleGroup.add(cap, band);
+
+// ---------------------------------------------------------------------------
+// Ground shadow + caustic, baked from the bottle profile.
+// Light is static and the bottle is rotationally symmetric, so this is exact
+// in shape; penumbra widens with height like a real area light.
+// ---------------------------------------------------------------------------
+function outerRadiusAt(y) {
+  if (y >= CAP_Y0 && y <= CAP_Y1) return RC;
+  if (y >= 2.012 && y < CAP_Y0) return RC - 0.0015;
+  if (y >= LABEL_Y0 && y <= LABEL_Y1) return LABEL_R;
+  if (y < 0.06) return R - 0.06 + Math.sqrt(Math.max(0, 0.0036 - (0.06 - y) ** 2));
+  if (y > TOP) return 0;
+  if (y >= 1.972 && y <= 2.006) return RN + 0.035;
+  if (y > SH1) return RN;
+  return bodyRadius(y);
+}
+
+const SN = 1024, SS = 4.4, SCX = 0.6, SCZ = -0.75, SK = SN / SS;
+const offX = -LIGHT_POS.x / LIGHT_POS.y, offZ = -LIGHT_POS.z / LIGHT_POS.y;
+
+function softDisc(ctx, x, z, r, soft, v) {
+  const px = ((x - SCX) / SS + 0.5) * SN, pz = ((z - SCZ) / SS + 0.5) * SN;
+  const r0 = Math.max(0, r - soft) * SK, r1 = (r + soft) * SK;
+  const g = ctx.createRadialGradient(px, pz, r0, px, pz, r1);
+  const c = (k) => { const q = Math.round(v * k * 255); return `rgb(${q},${q},${q})`; };
+  g.addColorStop(0, c(1));
+  g.addColorStop(0.3, c(0.82));
+  g.addColorStop(0.55, c(0.45));
+  g.addColorStop(0.8, c(0.13));
+  g.addColorStop(1, 'rgb(0,0,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(px, pz, r1, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function bakeGround() {
+  const shadowC = document.createElement('canvas');
+  shadowC.width = shadowC.height = SN;
+  const sc = shadowC.getContext('2d');
+  sc.fillStyle = '#000';
+  sc.fillRect(0, 0, SN, SN);
+  sc.globalCompositeOperation = 'lighten';
+
+  const causticC = document.createElement('canvas');
+  causticC.width = causticC.height = SN;
+  const cc = causticC.getContext('2d');
+  cc.fillStyle = '#000';
+  cc.fillRect(0, 0, SN, SN);
+  cc.globalCompositeOperation = 'lighten';
+
+  for (let y = 0; y <= CAP_Y1; y += 0.005) {
+    const r = outerRadiusAt(y);
+    if (r <= 0) continue;
+    let s;
+    if (y >= 2.012) s = 0.55;
+    else if (y >= LABEL_Y0 && y <= LABEL_Y1) s = 0.6;
+    else if (y < WATER_Y) s = 0.2;
+    else s = 0.085;
+    s *= 1 - 0.12 * y;
+    const soft = 0.012 + 0.055 * y;
+    softDisc(sc, offX * y, offZ * y, r, soft, s);
+
+    // focused light through the water column (where the label doesn't block it)
+    const lit = y > 0.06 && y < WATER_Y - 0.01 && (y < LABEL_Y0 || y > LABEL_Y1);
+    if (lit) {
+      softDisc(cc, offX * y, offZ * y, r * 0.55, soft, 0.18);
+      softDisc(cc, offX * y, offZ * y, r * 0.12, 0.02 + soft * 0.5, 0.85);
+    }
+  }
+  // contact occlusion right under the base
+  softDisc(sc, 0, 0, R * 0.95, 0.1, 0.62);
+  softDisc(sc, 0, 0, R - 0.03, 0.025, 0.85);
+
+  const make = (canvas, mat) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(SS, SS), mat);
+    m.rotation.x = -Math.PI / 2;
+    m.position.set(SCX, 0, SCZ);
+    return m;
+  };
+  const shadowTex = new THREE.CanvasTexture(shadowC);
+  const shadow = make(shadowC, new THREE.MeshBasicMaterial({
+    color: 0x0d1a24, alphaMap: shadowTex, transparent: true, depthWrite: false,
+  }));
+  shadow.position.y = 0.002;
+  shadow.renderOrder = -2;
+
+  const causticTex = new THREE.CanvasTexture(causticC);
+  const caustic = make(causticC, new THREE.MeshBasicMaterial({
+    color: new THREE.Color(0.8, 0.96, 1.0), map: causticTex, transparent: true,
+    blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.55,
+  }));
+  caustic.position.y = 0.003;
+  caustic.renderOrder = -1;
+  scene.add(shadow, caustic);
+}
+bakeGround();
+
+// ---------------------------------------------------------------------------
+// Resize, interaction, animation
+// ---------------------------------------------------------------------------
+function onResize() {
+  const w = window.innerWidth, h = window.innerHeight, aspect = w / h;
+  camera.aspect = aspect;
+  camera.fov = aspect < 0.85 ? Math.min(58, 32 * Math.pow(0.85 / aspect, 0.85)) : 32;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}
+window.addEventListener('resize', onResize);
+onResize();
+
+const hint = document.getElementById('hint');
+let spin = 0.28, targetSpin = 0.28;
+controls.addEventListener('start', () => { targetSpin = 0.05; hint.style.opacity = '0'; });
+controls.addEventListener('end', () => { targetSpin = 0.28; });
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  spin += (targetSpin - spin) * Math.min(1, dt * 2.5);
+  bottleGroup.rotation.y += spin * dt;
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

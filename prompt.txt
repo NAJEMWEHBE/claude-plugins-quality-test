@@ -1,0 +1,9 @@
+Create a 3D bottle of water as a single self-contained file named index.html in the current folder.
+
+- Use Three.js loaded from a CDN (ES modules via an import map).
+- A clear plastic or glass bottle with a cap and a paper label, water inside at about 70% full, on a simple surface with nice lighting and soft shadows.
+- It should slowly rotate, and the user can drag to orbit and scroll to zoom.
+- Make it look as good and realistic as you can.
+
+Do not ask me questions; make reasonable choices yourself. Only create index.html.
+Done means: index.html exists and opens in a browser with no console errors.

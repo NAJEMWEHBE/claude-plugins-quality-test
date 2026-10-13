@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Water Bottle</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1419; }
+  canvas { display: block; touch-action: none; }
+  #hint {
+    position: fixed; left: 20px; bottom: 16px;
+    font: 500 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: rgba(220, 232, 242, 0.55); letter-spacing: 0.02em;
+    pointer-events: none; user-select: none;
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="hint">Drag to orbit &middot; Scroll to zoom</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+// ---------- renderer / scene ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const BG = 0x0e1419;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(BG);
+scene.fog = new THREE.Fog(BG, 7, 20);
+
+const pmrem = new THREE.PMREMGenerator(renderer);
+const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environment = envTex;
+scene.environmentIntensity = 0.75;
+
+const camera = new THREE.PerspectiveCamera(32, window.innerWidth / window.innerHeight, 0.05, 60);
+camera.position.set(2.7, 1.75, 3.7);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.95, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.enablePan = false;
+controls.minDistance = 1.8;
+controls.maxDistance = 9;
+controls.maxPolarAngle = Math.PI / 2 - 0.04;
+controls.update();
+
+// ---------- lights ----------
+scene.add(new THREE.HemisphereLight(0xcfe4ff, 0x1a2027, 0.35));
+
+const key = new THREE.SpotLight(0xfff4e8, 140, 0, 0.5, 1, 2);
+key.position.set(3, 6.2, 3);
+key.target.position.set(0, 0.6, 0);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.camera.near = 3;
+key.shadow.camera.far = 14;
+key.shadow.bias = -0.0004;
+key.shadow.normalBias = 0.02;
+scene.add(key, key.target);
+
+const rim = new THREE.DirectionalLight(0xbfdcff, 2.2);
+rim.position.set(-3, 3, -4);
+scene.add(rim);
+
+const fill = new THREE.DirectionalLight(0xdfe9ff, 0.5);
+fill.position.set(-4, 2, 3);
+scene.add(fill);
+
+// ---------- floor ----------
+const floor = new THREE.Mesh(
+  new THREE.CircleGeometry(30, 96),
+  new THREE.MeshStandardMaterial({ color: 0x2b3640, roughness: 0.62, metalness: 0 })
+);
+floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
+scene.add(floor);
+
+function radialTexture(stops, size = 256) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  for (const [o, col] of stops) grad.addColorStop(o, col);
+  g.fillStyle = grad;
+  g.fillRect(0, 0, size, size);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+// soft contact shadow under the base
+const contact = new THREE.Mesh(
+  new THREE.PlaneGeometry(1.25, 1.25),
+  new THREE.MeshBasicMaterial({
+    map: radialTexture([[0, 'rgba(0,0,0,0.75)'], [0.45, 'rgba(0,0,0,0.35)'], [1, 'rgba(0,0,0,0)']]),
+    transparent: true, depthWrite: false
+  })
+);
+contact.rotation.x = -Math.PI / 2;
+contact.position.y = 0.002;
+scene.add(contact);
+
+// fake caustic: light focused through the water, landing in the shadow side
+const caustic = new THREE.Mesh(
+  new THREE.PlaneGeometry(1, 1),
+  new THREE.MeshBasicMaterial({
+    map: radialTexture([[0, 'rgba(200,235,255,0.55)'], [0.35, 'rgba(120,190,235,0.22)'], [1, 'rgba(0,0,0,0)']]),
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending
+  })
+);
+caustic.rotation.set(-Math.PI / 2, 0, Math.PI / 4);
+caustic.scale.set(0.55, 1.1, 1);
+caustic.position.set(-0.62, 0.003, -0.62);
+scene.add(caustic);
+
+// ---------- bottle profile ----------
+const R = 0.35, SH0 = 1.30, SH1 = 1.78, NECK = 0.13, TOP = 2.08;
+const LABEL_Y0 = 0.42, LABEL_Y1 = 1.06, WATER_Y = 1.25, WALL = 0.007;
+const V = (x, y) => new THREE.Vector2(x, y);
+
+function outerR(y) {
+  if (y <= SH0) {
+    // grip ribs; bounds are multiples of the 0.035 period so the radius stays continuous
+    const ribbed = (y > 0.14 && y < 0.35) || (y > 1.12 && y < 1.26);
+    return R - (ribbed ? 0.008 * Math.sin(Math.PI * y / 0.035) ** 2 : 0);
+  }
+  if (y <= SH1) {
+    const t = (y - SH0) / (SH1 - SH0);
+    return NECK + (R - NECK) * (0.5 + 0.5 * Math.cos(Math.PI * t));
+  }
+  return NECK;
+}
+
+const outer = [V(0, 0.025), V(0.15, 0.012), V(0.27, 0.004), V(0.32, 0.012), V(0.342, 0.04), V(R, 0.08)];
+for (let y = 0.09; y <= SH1 + 1e-6; y += 0.005) outer.push(V(outerR(y), y));
+outer.push(V(NECK, 1.84), V(0.168, 1.848), V(0.168, 1.868), V(NECK, 1.874), V(NECK, TOP), V(0.114, TOP));
+
+const water = [V(0, 0.034), V(0.15, 0.022), V(0.265, 0.014), V(0.312, 0.022), V(0.334, 0.048), V(R - WALL, 0.088)];
+for (let y = 0.095; y < WATER_Y; y += 0.005) water.push(V(outerR(y) - WALL, y));
+water.push(V(outerR(WATER_Y) - WALL, WATER_Y));
+
+const bottle = new THREE.Group();
+scene.add(bottle);
+
+// clear PET shell: low base opacity, more opaque at grazing angles and in highlights (fresnel)
+const shellMat = new THREE.MeshPhysicalMaterial({
+  color: 0xf0f7ff, roughness: 0.04, metalness: 0, ior: 1.57,
+  clearcoat: 1, clearcoatRoughness: 0.02, specularIntensity: 1,
+  transparent: true, opacity: 0.1, side: THREE.DoubleSide, depthWrite: false, envMap: envTex, envMapIntensity: 1.4
+});
+shellMat.onBeforeCompile = (s) => {
+  s.fragmentShader = s.fragmentShader.replace('#include <opaque_fragment>', `
+    float fres = pow(1.0 - abs(dot(normalize(vViewPosition), normal)), 2.5);
+    float lum = dot(outgoingLight, vec3(0.299, 0.587, 0.114));
+    diffuseColor.a = clamp(diffuseColor.a + fres * 0.6 + smoothstep(0.45, 1.6, lum) * 0.85, 0.0, 1.0);
+    #include <opaque_fragment>`);
+};
+const shell = new THREE.Mesh(new THREE.LatheGeometry(outer, 128), shellMat);
+shell.renderOrder = 2;
+bottle.add(shell);
+
+// water: real refraction via transmission
+const waterMat = new THREE.MeshPhysicalMaterial({
+  color: 0xf4fbff, transmission: 1, roughness: 0.02, metalness: 0, ior: 1.333,
+  thickness: 0.65, attenuationColor: 0x9fd2ee, attenuationDistance: 1.6,
+  specularIntensity: 1, envMapIntensity: 1
+});
+bottle.add(new THREE.Mesh(new THREE.LatheGeometry(water, 128), waterMat));
+const surface = new THREE.Mesh(new THREE.CircleGeometry(outerR(WATER_Y) - WALL, 128), waterMat);
+surface.rotation.x = -Math.PI / 2;
+surface.position.y = WATER_Y;
+bottle.add(surface);
+
+// tiny bubbles clinging to the inner wall
+const bubbleCount = 40;
+const bubbles = new THREE.InstancedMesh(
+  new THREE.SphereGeometry(1, 12, 8),
+  new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0, transparent: true, opacity: 0.35, envMap: envTex, envMapIntensity: 2 }),
+  bubbleCount
+);
+const m4 = new THREE.Matrix4();
+for (let i = 0; i < bubbleCount; i++) {
+  const y = 0.08 + Math.random() * (WATER_Y - 0.15);
+  const a = Math.random() * Math.PI * 2;
+  const s = 0.003 + Math.random() ** 2 * 0.009;
+  const r = outerR(y) - WALL - s - 0.002;
+  m4.makeScale(s, s, s).setPosition(Math.cos(a) * r, y, Math.sin(a) * r);
+  bubbles.setMatrixAt(i, m4);
+}
+bubbles.renderOrder = 1;
+bottle.add(bubbles);
+
+// ---------- label ----------
+function labelTexture() {
+  const W = 2048, H = 560;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d');
+
+  const bg = g.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#0a355e');
+  bg.addColorStop(0.6, '#0c5880');
+  bg.addColorStop(1, '#0f7695');
+  g.fillStyle = bg;
+  g.fillRect(0, 0, W, H);
+
+  g.fillStyle = '#eef5fa';
+  g.fillRect(0, 16, W, 8);
+  g.fillRect(0, H - 24, W, 8);
+
+  // front panel, centred at x = 512
+  const fx = 512;
+  const peaks = [[fx - 330, 470], [fx - 210, 360], [fx - 140, 410], [fx - 30, 300], [fx + 70, 395], [fx + 170, 335], [fx + 330, 470]];
+  g.fillStyle = 'rgba(190, 225, 245, 0.28)';
+  g.beginPath(); g.moveTo(...peaks[0]); peaks.slice(1).forEach(p => g.lineTo(...p)); g.closePath(); g.fill();
+  g.fillStyle = 'rgba(255, 255, 255, 0.9)';
+  for (const [px, py] of [[fx - 210, 360], [fx - 30, 300], [fx + 170, 335]]) {
+    g.beginPath();
+    g.moveTo(px, py);
+    g.lineTo(px + 34, py + 30); g.lineTo(px + 14, py + 24); g.lineTo(px, py + 38);
+    g.lineTo(px - 14, py + 24); g.lineTo(px - 34, py + 30);
+    g.closePath(); g.fill();
+  }
+  g.fillStyle = 'rgba(255,255,255,0.35)';
+  g.fillRect(fx - 330, 470, 660, 2);
+
+  g.textAlign = 'center';
+  g.fillStyle = '#ffffff';
+  g.letterSpacing = '22px';
+  g.font = '800 150px "Helvetica Neue", "Segoe UI", Arial, sans-serif';
+  g.fillText('ALPINA', fx + 11, 200);
+  g.letterSpacing = '12px';
+  g.font = '600 34px "Helvetica Neue", "Segoe UI", Arial, sans-serif';
+  g.fillStyle = '#bfe3f5';
+  g.fillText('NATURAL SPRING WATER', fx + 6, 258);
+  g.letterSpacing = '6px';
+  g.font = '600 30px "Helvetica Neue", "Segoe UI", Arial, sans-serif';
+  g.fillStyle = '#ffffff';
+  g.fillText('500 mL', fx + 3, 516);
+
+  // back panel, centred at x = 1536
+  const bx = 1536;
+  g.letterSpacing = '4px';
+  g.textAlign = 'left';
+  g.fillStyle = '#ffffff';
+  g.font = '700 30px "Helvetica Neue", "Segoe UI", Arial, sans-serif';
+  g.fillText('TYPICAL ANALYSIS  mg/L', bx - 280, 110);
+  g.letterSpacing = '1px';
+  g.font = '400 25px "Helvetica Neue", "Segoe UI", Arial, sans-serif';
+  const rows = [['Calcium', '11.5'], ['Magnesium', '1.8'], ['Sodium', '2.4'], ['Bicarbonate', '38'], ['Sulphate', '6.1'], ['pH at source', '7.6']];
+  rows.forEach(([k, v], i) => {
+    const y = 156 + i * 38;
+    g.fillStyle = '#d6ebf6';
+    g.fillText(k, bx - 280, y);
+    g.textAlign = 'right'; g.fillText(v, bx + 40, y); g.textAlign = 'left';
+    g.fillStyle = 'rgba(255,255,255,0.18)';
+    g.fillRect(bx - 280, y + 10, 320, 1);
+  });
+  // barcode
+  g.fillStyle = '#ffffff';
+  g.fillRect(bx + 100, 120, 200, 260);
+  g.fillStyle = '#111';
+  let x = bx + 116;
+  while (x < bx + 284) {
+    const w = 2 + Math.floor(Math.random() * 4);
+    g.fillRect(x, 136, w, 200);
+    x += w + 2 + Math.floor(Math.random() * 4);
+  }
+  g.font = '500 20px "Courier New", monospace';
+  g.letterSpacing = '3px';
+  g.textAlign = 'center';
+  g.fillText('5 012345 678900', bx + 200, 366);
+  g.textAlign = 'left';
+  g.letterSpacing = '1px';
+  g.fillStyle = '#d6ebf6';
+  g.font = '400 22px "Helvetica Neue", "Segoe UI", Arial, sans-serif';
+  g.fillText('Bottled at source. Store cool, away from sunlight.', bx - 280, 470);
+  g.fillText('Recyclable bottle  —  please recycle.', bx - 280, 504);
+
+  // paper grain
+  const img = g.getImageData(0, 0, W, H);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const n = (Math.random() - 0.5) * 14;
+    d[i] += n; d[i + 1] += n; d[i + 2] += n;
+  }
+  g.putImageData(img, 0, 0);
+
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  return t;
+}
+
+const labelH = LABEL_Y1 - LABEL_Y0, labelR = R + 0.0035;
+const labelOut = new THREE.Mesh(
+  new THREE.CylinderGeometry(labelR, labelR, labelH, 160, 1, true),
+  new THREE.MeshPhysicalMaterial({ map: labelTexture(), roughness: 0.42, clearcoat: 0.35, clearcoatRoughness: 0.35 })
+);
+const labelIn = new THREE.Mesh(
+  new THREE.CylinderGeometry(labelR - 0.001, labelR - 0.001, labelH, 160, 1, true),
+  new THREE.MeshStandardMaterial({ color: 0xe6edf2, roughness: 0.9, side: THREE.BackSide })
+);
+for (const m of [labelOut, labelIn]) {
+  m.position.y = LABEL_Y0 + labelH / 2;
+  m.castShadow = true;
+  bottle.add(m);
+}
+
+// ---------- cap ----------
+const capMat = new THREE.MeshPhysicalMaterial({ color: 0x1d5aa3, roughness: 0.38, clearcoat: 0.4, clearcoatRoughness: 0.3 });
+const capGeo = new THREE.CylinderGeometry(0.152, 0.158, 0.21, 360, 1, false);
+{
+  // knurled grip ridges on the side wall
+  // applied to cap-disk vertices too so the top face follows the ridges
+  const pos = capGeo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const a = Math.atan2(pos.getZ(i), pos.getX(i));
+    const k = 1 - 0.022 * (0.5 + 0.5 * Math.cos(a * 60));
+    pos.setX(i, pos.getX(i) * k);
+    pos.setZ(i, pos.getZ(i) * k);
+  }
+  capGeo.computeVertexNormals();
+}
+const cap = new THREE.Mesh(capGeo, capMat);
+cap.position.y = 2.01;
+cap.castShadow = true;
+bottle.add(cap);
+
+const tamper = new THREE.Mesh(new THREE.CylinderGeometry(0.151, 0.151, 0.026, 96, 1, true), capMat.clone());
+tamper.material.side = THREE.DoubleSide;
+tamper.position.y = 1.889;
+tamper.castShadow = true;
+bottle.add(tamper);
+
+// ---------- loop ----------
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  bottle.rotation.y += clock.getDelta() * 0.3;
+  controls.update();
+  renderer.render(scene, camera);
+});
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
